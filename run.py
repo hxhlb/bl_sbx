@@ -8,6 +8,7 @@ import posixpath
 import sqlite3
 import shutil
 import time
+import plistlib
 from pathlib import Path
 
 import asyncio
@@ -34,7 +35,7 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
     pc = ProcessControl(dvt)
     
     # Find bookassetd container UUID
-    uuid = open("uuid.txt", "r").read().strip()
+    uuid = open("uuid.txt", "r").read().strip() if Path("uuid.txt").exists() else ""
     if len(uuid) < 10:
         try:
             pc.launch("com.apple.iBooks")
@@ -89,9 +90,8 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
     
     # Upload com.apple.MobileGestalt.plist
     click.secho("Uploading com.apple.MobileGestalt.plist", fg="yellow")
-    local_file = Path(__file__).parent / "com.apple.MobileGestalt.plist"
     remote_file = "com.apple.MobileGestalt.plist"
-    AfcService(lockdown=service_provider).push(local_file, remote_file)
+    AfcService(lockdown=service_provider).push(mg_file, remote_file)
     
     # Upload downloads.28.sqlitedb
     click.secho("Uploading downloads.28.sqlitedb", fg="yellow")
@@ -125,6 +125,8 @@ def main_callback(service_provider: LockdownClient, dvt: DvtSecureSocketProxySer
     except Exception as e:
         click.secho(f"Error launching Books app: {e}", fg="red")
         return
+    
+    click.secho("Done. If it doesn't take effect wait a bit and try again.", fg="green")
 
 def _run_async_rsd_connection(address, port):
     async def async_connection():
@@ -186,9 +188,25 @@ async def connection_context(udid):# Create a LockdownClient instance
     try:
         service_provider = create_using_usbmux(serial=udid)
         marketing_name = service_provider.get_value(key="MarketingName")
+        marketing_name = service_provider.get_value(key="MarketingName")
         device_build = service_provider.get_value(key="BuildVersion")
+        device_product_type = service_provider.get_value(key="ProductType")
         device_version = parse_version(service_provider.product_version)
         click.secho(f"Got device: {marketing_name} (iOS {device_version}, Build {device_build})", fg="blue")
+        
+        # Validate MobileGestalt file
+        mg_contents = plistlib.load(open(mg_file, "rb"))
+        cache_extra = mg_contents["CacheExtra"]
+        if cache_extra is None:
+            click.secho("Error: Invalid com.apple.MobileGestalt.plist file", fg="red")
+            return
+        cache_build_version = mg_contents["CacheVersion"]
+        cache_product_type = cache_extra["0+nc/Udy4WNG8S+Q7a/s1A"] # ThinningProductType
+        if cache_build_version != device_build or cache_product_type != device_product_type:
+            click.secho("Error: It seems you are using MobileGestalt file for a different device", fg="red")
+            click.secho(f"Device Build: {device_build}, MobileGestalt Build: {cache_build_version}", fg="red")
+            click.secho(f"Device ProductType: {device_product_type}, MobileGestalt ProductType: {cache_product_type}", fg="red")
+            return
         
         if device_version >= parse_version('17.0'):
             available_address = await create_tunnel(udid)
@@ -208,7 +226,9 @@ async def connection_context(udid):# Create a LockdownClient instance
         raise Exception(f"Connection not established... {e}")
 
 if __name__ == "__main__":
-    if len(sys.argv) == 1:
-        print("Usage: python run.py <udid>")
+    if len(sys.argv) != 3:
+        print("Usage: python run.py <udid> /path/to/com.apple.MobileGestalt.plist")
         exit(1)
+        
+    mg_file = sys.argv[2]
     asyncio.run(connection_context(sys.argv[1]))
